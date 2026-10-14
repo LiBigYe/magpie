@@ -81,7 +81,18 @@ try { discoveryIgnored = new Set(JSON.parse(localStorage.getItem("magpie.discove
 // the pick is one for every call and kept, the events drawn per call
 let sseView = "events";
 try { sseView = localStorage.getItem("magpie.sseView") || "events"; } catch {}
-const sseShown = new Map(); // call id → how many events are drawn
+// SSE_SHOWN_KEEP: how many calls' event counts are kept. One id is added per
+// call the reader ever opened, and only the call on screen reads one back, so
+// kept whole the map grew for the life of the window; a call whose count has
+// gone draws from its first page again. SSE_PAGE events are drawn at a time
+// (see more() in renderCall).
+const SSE_SHOWN_KEEP = 20;
+const sseShown = new Map(); // call id → how many events are drawn, the newest SSE_SHOWN_KEEP calls
+function keepSseShown(id, n) {
+  sseShown.delete(id);
+  sseShown.set(id, n);
+  for (const k of sseShown.keys()) if (sseShown.size > SSE_SHOWN_KEEP) sseShown.delete(k);
+}
 let savedModelFavorites = [];
 try { savedModelFavorites = JSON.parse(localStorage.getItem("magpie.modelFavorites") || "[]"); } catch {}
 const modelFavorites = new Set(Array.isArray(savedModelFavorites) ? savedModelFavorites : []);
@@ -6637,7 +6648,7 @@ function sseBodyPanel(label, raw, truncated, id) {
   const more = () => {
     const upto = Math.min(events.length, Math.max(sseShown.get(id) || 0, shown + SSE_PAGE));
     for (; shown < upto; shown++) code.append(sseEventNode(events[shown], id + "|ev" + shown));
-    if (shown > SSE_PAGE) sseShown.set(id, shown);
+    if (shown > SSE_PAGE) keepSseShown(id, shown);
     foot.hidden = view !== "events" || shown >= events.length;
     shownNote.textContent = t("{n} of {total} events shown", { n: shown, total: events.length });
     moreB.textContent = t("Show {n} more events", { n: Math.min(SSE_PAGE, events.length - shown) });
@@ -19043,7 +19054,18 @@ let sessOver = null;
 let sessOverAt = "";
 let sessOverLoading = "";
 let sessTopOpen = ""; // the top session opened to its details
-const sessFull = new Map(); // a top session's key → the session read whole, or "…" while it is read
+// SESS_FULL_KEEP: how many read-whole sessions are kept. One is as big as the
+// session is — a long Codex or Claude Code rollout is tens of megabytes of
+// messages once it is parsed into the page — so a reader who opens several of
+// the biggest sessions must not hold them all: the newest few stay, and one
+// dropped is read again if it is asked for.
+const SESS_FULL_KEEP = 2;
+const sessFull = new Map(); // a top session's key → the session read whole, or "…" while it is read, the newest few
+function keepSessFull(key, full) {
+  sessFull.delete(key);
+  sessFull.set(key, full);
+  for (const k of sessFull.keys()) if (sessFull.size > SESS_FULL_KEEP) sessFull.delete(k);
+}
 
 function renderUsageTab() {
   const seg = $("#usageTab");
@@ -20062,8 +20084,8 @@ function renderSessTop() {
       sessTopOpen = open ? "" : s.key;
       const had = sessFull.get(s.key);
       if (!open && (!had || had.error)) {
-        sessFull.set(s.key, "…");
-        api("sessions/one?key=" + encodeURIComponent(s.key)).then((full) => sessFull.set(s.key, full), (e) => sessFull.set(s.key, { error: e.message }))
+        keepSessFull(s.key, "…");
+        api("sessions/one?key=" + encodeURIComponent(s.key)).then((full) => keepSessFull(s.key, full), (e) => keepSessFull(s.key, { error: e.message }))
           .then(() => { if (sessTopOpen === s.key && view === "usage" && usageTab === "sessions") renderSessTop(); });
       }
       renderSessTop();

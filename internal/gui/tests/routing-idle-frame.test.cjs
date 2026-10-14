@@ -1,13 +1,17 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
-// The Routing page's own frame loop runs only while the page is the one in
-// sight. With Agents selected — #view-routing.hidden, the window drawing
-// frames, the tab in sight — the loop must stop asking for frames: the
-// function frame that drew the page every frame until now asked for the
-// next one whatever the page was showing, so the magpies were posed (and
-// the loop kept awake) forever while nobody looked at Routing. In sight
-// again the view is picked and the loop resumes. What the poll lists came
-// in meanwhile is another test's business (routing-flood); this one counts
-// the loop's own callbacks.
+// The Routing page's own frame loop asks for frames only while the page is the
+// one in sight and it has something to draw. With Agents selected —
+// #view-routing.hidden, the window drawing frames, the tab in sight — the loop
+// must stop asking for frames: the function frame that drew the page every
+// frame until now asked for the next one whatever the page was showing, so the
+// magpies were posed (and the loop kept awake) forever while nobody looked at
+// Routing. In sight again the view is picked and the loop is armed. And while
+// it is in sight with nothing flying, nothing captioned and no flip, it asks
+// for none either (routing-idle-loop.test.cjs holds that half: it drew the
+// stage again every second and laid the page out every frame, for hours, on a
+// window nobody was asking anything of). What the poll lists came in meanwhile
+// is another test's business (routing-flood); this one counts the loop's own
+// callbacks.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -28,6 +32,16 @@ function req(id) {
   return { id, seq: id, time: iso(t0), agent: agentsOf[id % agentsOf.length], model: order[0].model, provider: order[0].provider, order, tries, done: true, status: 200, ms: 400, tokens: 900 };
 }
 
+// underWay is one the gateway has not answered yet: routing picked a seat and
+// the request is out at it, which is what a flight draws
+function underWay() {
+  const r = req(1);
+  r.done = false;
+  r.status = 0;
+  r.tries = r.tries.map((tr) => ({ ...tr, done: false, ms: 0, status: 0 }));
+  return r;
+}
+
 function serve(lang, feed = [req(1)]) {
   const state = { agents: agentsOf.map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1), path: `/test/${id}`, fields: [] })), profiles: [], settings: { lang, theme: "light" } };
   return async (route) => {
@@ -37,7 +51,14 @@ function serve(lang, feed = [req(1)]) {
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
-    if (url.pathname === "/api/gateway/trace") return json({ mine: true, now: new Date().toISOString(), seq: url.searchParams.get("after") || 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: url.searchParams.get("wait") ? [] : feed });
+    if (url.pathname === "/api/gateway/trace") {
+      // the gateway holds a wait=1 answer until it has one (up to 25s). Here
+      // it is held for a moment too: answered at once, the page would be
+      // polled in a tight loop and could never rest, which is what the loop's
+      // own tests watch for
+      if (url.searchParams.get("wait")) await new Promise((r) => setTimeout(r, 1500));
+      return json({ mine: true, now: new Date().toISOString(), seq: url.searchParams.get("after") || 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: url.searchParams.get("wait") ? [] : feed });
+    }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
     if (url.pathname === "/api/groups") return json({ models: [], groups: [], pools: [] });
     if (url.pathname === "/api/providers") return json({ providers: [], excluded: [], gateway: { running: true, window: true, url: "http://127.0.0.1:3999" } });
@@ -92,7 +113,7 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     page.setDefaultTimeout(5000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
-    await page.route("**/*", serve(lang));
+    await page.route("**/*", serve(lang, [underWay()]));
     t.after(async () => {
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -102,11 +123,21 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     });
     await page.goto("http://magpie.test/?view=routing");
     await page.locator(".rt-req").first().waitFor();
-    // Routing in sight: the loop is running, and it is this loop we count
+    // Routing in sight and a request under way: the loop flies it, and it is
+    // this loop we count
     await page.waitForFunction(() => window.__seenFrame, null, { timeout: 5000 });
+    await page.waitForFunction(() => window.__packets > 0, null, { timeout: 5000 });
     await page.evaluate(() => window.__mark());
     const flying = await page.evaluate(() => window.__count(600));
-    assert(flying > 10, `the loop must run while Routing is in sight (${flying} frames in 600ms)`);
+    assert(flying > 10, `the loop must fly a request while Routing is in sight (${flying} frames in 600ms)`);
+    // it lands and holds at the account, waiting for the answer: nothing is
+    // left to draw, so no frame is asked for — the loop used to ask for every
+    // frame of every hour the page was in sight, and draw the stage again
+    // each second (see routing-idle-loop.test.cjs)
+    await page.waitForTimeout(1600);
+    await page.evaluate(() => window.__mark());
+    const resting = await page.evaluate(() => window.__count(1000));
+    assert(resting <= 3, `${resting} frames were drawn with nothing flying`);
     assert(errors.length === 0, errors.join("\n"));
 
     // Agents picked: #view-routing.hidden, the tab in sight, frames drawn
@@ -121,11 +152,12 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     await page.evaluate(() => window.__mark());
     assert.equal(await page.evaluate(() => window.__count(1200)), 0, "the Routing loop came back with Agents still selected");
 
-    // Routing picked again: the loop resumes, and the page is drawn
+    // Routing picked again: the loop is armed again (start), the page as it
+    // is now is drawn, and the request still out flies again
     await page.locator('#nav button[data-view="routing"]').click();
     await page.evaluate(() => window.__mark());
     const again = await page.evaluate(() => window.__count(600));
-    assert(again > 10, `picking Routing again must resume the loop (${again} frames in 600ms)`);
+    assert(again >= 1, `picking Routing again must arm the loop (${again} frames in 600ms)`);
     assert.equal(await page.evaluate(() => document.querySelectorAll(".rt-req").length >= 1), true, "the page is drawn again");
     assert(errors.length === 0, errors.join("\n"));
     // A document visibility event must stop the loop even when the engine

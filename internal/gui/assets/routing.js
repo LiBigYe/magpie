@@ -985,6 +985,7 @@
     const tr = { dot, bird, legs, t0: performance.now(), ms: still() ? 0 : ms, res, g: gen };
     pose(tr, 0);
     trips.push(tr);
+    start(); // the loop rests while nothing flies, so a new flight wakes it
   }).finally(() => { for (const l of legs) if (l.j) l.p.remove(); });
 
   // tip is where a flight meets a wire's end or start, and which way it
@@ -1035,6 +1036,7 @@
     if (!lo) capQ = capQ.filter((c) => !c.lo);
     capQ.push({ s, lo });
     if (capQ.length > 3) capQ.shift();
+    start(); // a caption is shown by a frame, and the loop rests between them
   }
   function show(c) { capLo = !!c.lo; cap.textContent = c.s; cap.classList.remove("in"); void cap.offsetWidth; cap.classList.add("in"); capAt = performance.now(); }
 
@@ -1466,6 +1468,7 @@
       void list.offsetWidth;
       for (const [, li] of placed) { li.style.transition = ""; li.style.transform = ""; }
       flipUntil = performance.now() + 520;
+      start(); // the wires follow the rows that moved, on the frames the flip asks for
     }
     header(cur, ags.length);
     layout();
@@ -3075,15 +3078,19 @@
     renderAll();
   }
   let seen = false, lastFrame = 0, ticking = 0;
-  // the loop runs only while the page is the one in sight: out of sight it
-  // is not scheduled at all, so a hidden Routing page — the window hidden,
-  // another view picked, another tab open — asks for no frames forever
-  // (#302's other half). Shown again, start() resumes it, and resume()
-  // draws the page as it is now. The requests that came meanwhile are
-  // listed by the poll, which never stops.
+  // the loop runs while the page is the one in sight and it has something to
+  // draw: a flight, a caption waiting, a flip in progress, a replay, or the
+  // once-a-second tick (below) that keeps the countdowns, the reader's place
+  // and how many flights are up to date. Between those it is not scheduled —
+  // it asked for a frame every frame of every hour the window was open, for
+  // a page nobody was asking anything of (#302's other half;
+  // routing-idle-loop.test.cjs).
   function frame(ts) {
     ticking = 0;
     const vis = shown();
+    // in sight again, or back after frames were not drawn for a while (a
+    // covered window draws none and may not say it is hidden), or the tick's
+    // once a second: the page as it is now
     if (vis && (!seen || ts - lastFrame > 1000)) resume();
     seen = vis;
     lastFrame = ts;
@@ -3100,7 +3107,7 @@
       if (ts < flipUntil) layout();
       if (capQ.length && ts - capAt > (capLo && !capQ[0].lo ? 500 : 1700)) show(capQ.shift());
     } else pause();
-    if (vis) ticking = requestAnimationFrame(frame);
+    if (vis && (trips.length || capQ.length || rp || ts < flipUntil)) ticking = requestAnimationFrame(frame);
   }
   function pause() {
     if (ticking) cancelAnimationFrame(ticking);
@@ -3123,8 +3130,13 @@
   new MutationObserver(start).observe($("#view-routing"), { attributes: true, attributeFilter: ["hidden"] });
   document.addEventListener("visibilitychange", start);
   window.addEventListener("focus", start);
-  // countdowns tick once a second
-  setInterval(() => { if (shown()) { if (!pinned && loaded && cur) sync(); render(); renderActs(listed()); } }, 1000);
+  // countdowns tick once a second: the stage, the log and the history bar as
+  // they are now, the accounts list with its countdowns, and one frame — the
+  // frame the loop is armed for here is the one that resumes the page after
+  // frames were not drawn (a covered window, another tab), which is why this
+  // arms it rather than trusting a frame to be on its way. What a second no
+  // longer does is ask for a frame every frame for sixty of them.
+  setInterval(() => { if (shown()) { start(); if (!pinned && loaded && cur) sync(); renderAll(); renderActs(listed()); } }, 1000);
 
   function offline(msg) {
     off.textContent = msg;
